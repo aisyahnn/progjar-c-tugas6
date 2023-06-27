@@ -1,47 +1,60 @@
-import base64
+from socket import *
+import sys
 import os
-from os.path import join, dirname, realpath
 import json
 import uuid
 import logging
-from queue import  Queue
-import threading 
 import socket
-from datetime import datetime
+import threading
+from queue import  Queue
 
 class RealmThreadCommunication(threading.Thread):
     def __init__(self, chats, realm_dest_address, realm_dest_port):
         self.chats = chats
-        self.chat = {}
+        self.chat = {
+            'users': {},
+            'groups': {}
+        }
         self.realm_dest_address = realm_dest_address
         self.realm_dest_port = realm_dest_port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((self.realm_dest_address, self.realm_dest_port))
-        threading.Thread.__init__(self)
+        try:
+            self.sock.connect((self.realm_dest_address, self.realm_dest_port))
+            threading.Thread.__init__(self)
+        except:
+            return None
 
     def sendstring(self, string):
         try:
             self.sock.sendall(string.encode())
             receivedmsg = ""
             while True:
-                data = self.sock.recv(1024)
+                data = self.sock.recv(32)
                 print("diterima dari server", data)
                 if (data):
-                    receivedmsg = "{}{}" . format(receivedmsg, data.decode())  #data harus didecode agar dapat di operasikan dalam bentuk string
+                    receivedmsg = "{}{}" . format(receivedmsg, data.decode())
                     if receivedmsg[-4:]=='\r\n\r\n':
                         print("end of string")
                         return json.loads(receivedmsg)
         except:
             self.sock.close()
-            return error_message('Gagal')
-    
-    def put(self, message):
+            return {'status': 'ERROR', 'message': 'Gagal'}
+
+    def put_private(self, message):
         dest = message['msg_to']
         try:
-            self.chat[dest].put(message)
+            self.chat['users'][dest].put(message)
         except KeyError:
-            self.chat[dest]=Queue()
-            self.chat[dest].put(message)
+            self.chat['users'][dest] = Queue()
+            self.chat['users'][dest].put(message)
+    
+    def put_group(self, message):
+        dest = message['msg_to']
+        try:
+            self.chat['groups'][dest].put(message)
+        except KeyError:
+            self.chat['groups'][dest] = Queue()
+            self.chat['groups'][dest].put(message)
 
 class Chat:
     def __init__(self):
@@ -50,17 +63,19 @@ class Chat:
         self.users['messi']={ 'nama': 'Lionel Messi', 'negara': 'Argentina', 'password': 'surabaya', 'incoming' : {}, 'outgoing': {}}
         self.users['henderson']={ 'nama': 'Jordan Henderson', 'negara': 'Inggris', 'password': 'surabaya', 'incoming': {}, 'outgoing': {}}
         self.users['lineker']={ 'nama': 'Gary Lineker', 'negara': 'Inggris', 'password': 'surabaya','incoming': {}, 'outgoing':{}}
+        self.groups = {}
         self.realms = {}
+        self.realms_info = {}
+
     def proses(self,data):
         j=data.split(" ")
         try:
             command=j[0].strip()
-            if (command=='auth'):
+            if (command=='login'):
                 username=j[1].strip()
                 password=j[2].strip()
-                logging.warning("AUTH: auth {} {}" . format(username,password))
-                return self.autentikasi_user(username,password)
-                   
+                logging.warning("LOGIN: login {} {}" . format(username,password))
+                return self.autentikasi_user(username,password)           
             elif (command=='send'):
                 sessionid = j[1].strip()
                 usernameto = j[2].strip()
@@ -70,106 +85,143 @@ class Chat:
                 usernamefrom = self.sessions[sessionid]['username']
                 logging.warning("SEND: session {} send message from {} to {}" . format(sessionid, usernamefrom,usernameto))
                 return self.send_message(sessionid,usernamefrom,usernameto,message)
-            
-            elif (command=='sendgroup'):
-                sessionid = j[1].strip()
-                usernamesto = j[2].strip().split(',')
-                message=""
-                for w in j[3:]:
-                    message="{} {}" . format(message,w)
-                usernamefrom = self.sessions[sessionid]['username']
-                logging.warning("SEND: session {} send message from {} to {}" . format(sessionid, usernamefrom,usernamesto))
-                return self.send_group_message(sessionid,usernamefrom,usernamesto,message)
-            
             elif (command=='inbox'):
                 sessionid = j[1].strip()
                 username = self.sessions[sessionid]['username']
                 logging.warning("INBOX: {}" . format(sessionid))
                 return self.get_inbox(username)
-      
-            elif (command=='addrealm'):
-                realm_id = j[1].strip()
-                realm_dest_address = j[2].strip()
-                realm_dest_port = int(j[3].strip())
-                return self.add_realm(realm_id, realm_dest_address, realm_dest_port, data)
-            
-            elif (command=='recvrealm'):
-                realm_id = j[1].strip()
-                realm_dest_address = j[2].strip()
-                realm_dest_port = int(j[3].strip())
-                return self.recv_realm(realm_id, realm_dest_address, realm_dest_port, data)
-            
-            elif (command == 'sendprivaterealm'):
+            elif (command=='creategroup'):
                 sessionid = j[1].strip()
-                realm_id = j[2].strip()
-                usernameto = j[3].strip()
-                message = ""
-                for w in j[4:]:
-                    message = "{} {}".format(message, w)
-                print(message)
-                usernamefrom = self.sessions[sessionid]['username']
-                logging.warning("SENDPRIVATEREALM: session {} send message from {} to {} in realm {}".format(sessionid, usernamefrom, usernameto, realm_id))
-                return self.send_realm_message(sessionid, realm_id, usernamefrom, usernameto, message, data)
-            elif (command == 'recvrealmprivatemsg'):
-                usernamefrom = j[1].strip()
-                realm_id = j[2].strip()
-                usernameto = j[3].strip()
-                message = ""
-                for w in j[4:]:
-                    message = "{} {}".format(message, w)
-                print(message)
-                logging.warning("RECVREALMPRIVATEMSG: recieve message from {} to {} in realm {}".format( usernamefrom, usernameto, realm_id))
-                return self.recv_realm_message(realm_id, usernamefrom, usernameto, message, data)
-            
-            elif (command == 'sendgrouprealm'):
+                username = self.sessions[sessionid]['username']
+                groupname=j[2].strip()
+                password=j[3].strip()
+                logging.warning("CREATEGROUP: session {} username {} creategroup {} {}" . format(sessionid, username, groupname, password))
+                return self.create_group(sessionid,username,groupname,password)
+            elif (command=='joingroup'):
                 sessionid = j[1].strip()
-                realm_id = j[2].strip()
-                usernamesto = j[3].strip().split(',')
-                message = ""
-                for w in j[4:]:
-                    message = "{} {}".format(message, w)
+                username = self.sessions[sessionid]['username']
+                groupname=j[2].strip()
+                password=j[3].strip()
+                logging.warning("JOINGROUP: session {} username {} joingroupgroup {} {}" . format(sessionid, username, groupname, password))
+                return self.join_group(sessionid,username,groupname,password)
+            elif (command=='sendgroup'):
+                sessionid = j[1].strip()
+                groupname = j[2].strip()
+                message=""
+                for w in j[3:]:
+                    message="{} {}" . format(message,w)
                 usernamefrom = self.sessions[sessionid]['username']
-                logging.warning("SENDGROUPREALM: session {} send message from {} to {} in realm {}".format(sessionid, usernamefrom, usernamesto, realm_id))
-                return self.send_group_realm_message(sessionid, realm_id, usernamefrom,usernamesto, message,data)
-            
-            elif (command == 'recvrealmgroupmsg'):
-                usernamefrom = j[1].strip()
-                realm_id = j[2].strip()
-                usernamesto = j[3].strip().split(',')
-                message = ""
-                for w in j[4:]:
-                    message = "{} {}".format(message, w) 
-                logging.warning("RECVGROUPREALM: send message from {} to {} in realm {}".format(usernamefrom, usernamesto, realm_id))
-                return self.recv_group_realm_message(realm_id, usernamefrom,usernamesto, message,data)
-            
+                logging.warning("SENDGROUP: session {} send message from {} to group {}" . format(sessionid, usernamefrom, groupname))
+                return self.send_group(sessionid,usernamefrom,groupname,message)
+            elif (command=='inboxgroup'):
+                sessionid = j[1].strip()
+                groupname = j[2].strip()
+                username = self.sessions[sessionid]['username']
+                logging.warning("INBOX: {}" . format(groupname))
+                return self.get_inbox_group(sessionid, username, groupname)
+            elif (command=='createrealm'):
+                realm_id = j[1].strip()
+                realm_address = j[2].strip()
+                realm_port = int(j[3].strip())
+                src_address = j[4].strip()
+                src_port = int(j[5].strip())
+                logging.warning("CREATEREALM: {}:{} create realm {} to {}:{}" . format(src_address, src_port, realm_id, realm_address, realm_port))
+                return self.create_realm(realm_id, realm_address, realm_port, src_address, src_port)
+            elif (command=='ackrealm'):
+                realm_id = j[1].strip()
+                realm_address = j[2].strip()
+                realm_port = int(j[3].strip())
+                src_address = j[4].strip()
+                src_port = int(j[5].strip())
+                logging.warning("ACKREALM: {}:{} received realm {} connection request from {}:{}" . format(realm_address, realm_port, realm_id, src_address, src_port))
+                return self.ack_realm(realm_id, realm_address, realm_port, src_address, src_port)
+            elif (command == 'checkrealm'):
+                logging.warning("CHECKREALM: {}")
+                return self.check_realm()
+            elif (command == 'sendrealm'):
+                src_address = j[1].strip()
+                src_port = int(j[2].strip())
+                sessionid = j[3].strip()
+                realm_id = j[4].strip()
+                usernameto = j[5].strip()
+                message=""
+                for w in j[6:]:
+                    message="{} {}" . format(message,w)
+                usernamefrom = self.sessions[sessionid]['username']
+                logging.warning("SENDREALM: session {} send realm {} message from {} to {}" . format(sessionid, realm_id, usernamefrom, usernameto))
+                return self.send_realm(sessionid,src_address,src_port,realm_id,usernamefrom,usernameto,message)
             elif (command == 'getrealminbox'):
                 sessionid = j[1].strip()
                 realmid = j[2].strip()
                 username = self.sessions[sessionid]['username']
                 logging.warning("GETREALMINBOX: {} from realm {}".format(sessionid, realmid))
                 return self.get_realm_inbox(username, realmid)
-            
             elif (command == 'getrealmchat'):
                 realmid = j[1].strip()
                 username = j[2].strip()
                 logging.warning("GETREALMCHAT: from realm {}".format(realmid))
-                return self.get_realm_chat(realmid, username)
+                return self.get_realm_chat(realmid, username)         
+            elif (command == 'inboxrealm'):
+                sessionid = j[1].strip()
+                realm_id = j[2].strip()
+                username = self.sessions[sessionid]['username']
+                logging.warning("INBOXREALM: session {} username {} realm {}" . format(sessionid, username, realm_id))
+                return self.get_inbox_realm(sessionid,username,realm_id)            
+            elif (command == 'remoteinboxrealm'):
+                username = j[1].strip()
+                realm_id = j[2].strip()
+                logging.warning("REMOTEINBOXREALM: username {} realm {}" . format(username, realm_id))
+                return self.get_remote_inbox_realm(username,realm_id)
+            elif (command == 'sendgrouprealm'):
+                src_address = j[1].strip()
+                src_port = int(j[2].strip())
+                sessionid = j[3].strip()
+                realm_id = j[4].strip()
+                groupname = j[5].strip()
+                message = ""
+                for w in j[6:]:
+                    message = "{} {}".format(message, w)
+                usernamefrom = self.sessions[sessionid]['username']
+                logging.warning("SENDGROUPREALM: session {} send message from {} to group {} in realm {}".format(sessionid, usernamefrom, groupname, realm_id))
+                return self.send_group_realm(sessionid, src_address, src_port, realm_id, usernamefrom, groupname, message)            
+            elif (command == 'recvgrouprealm'):
+                realm_id = j[1].strip()
+                usernamefrom = j[2].strip()
+                groupto = j[3].strip()
+                message=""
+                for w in j[4:]:
+                    message = "{} {}".format(message, w)
+                logging.warning("RECVGROUPREALM: realm {} receive message from {} to group {}" . format(realm_id, usernamefrom, groupto))
+                return self.recv_group_realm(realm_id,usernamefrom,groupto,message)            
+            elif (command == 'inboxgrouprealm'):
+                sessionid = j[1].strip()
+                realm_id = j[2].strip()
+                groupname = j[3].strip()
+                username = self.sessions[sessionid]['username']
+                logging.warning("INBOXGROUPREALM: session {} username {} groupname {} realm {}" . format(sessionid, username, groupname, realm_id))
+                return self.get_inbox_group_realm(sessionid,username,groupname,realm_id)           
+            elif (command == 'remoteinboxgrouprealm'):
+                groupname = j[1].strip()
+                realm_id = j[2].strip()
+                logging.warning("REMOTEINBOXGROUPREALM: groupname {} realm {}" . format(groupname, realm_id))
+                return self.get_remote_inbox_group_realm(groupname,realm_id)           
+            elif (command == "sessioncheck"):
+                return self.sessioncheck()            
             else:
-                print(command)
-                return error_message("**Protocol Tidak Benar")
+                return {'status': 'ERROR', 'message': '**Protocol Tidak Benar'}
         except KeyError:
-            return error_message("Informasi tidak ditemukan")
+            return { 'status': 'ERROR', 'message' : 'Informasi tidak ditemukan'}
         except IndexError:
-            return error_message("--Protocol Tidak Benar")
+            return {'status': 'ERROR', 'message': '--Protocol Tidak Benar'}
 
     def autentikasi_user(self,username,password):
         if (username not in self.users):
-            return error_message("Username tidak ditemukan")
+            return { 'status': 'ERROR', 'message': 'User Tidak Ada' }
         if (self.users[username]['password']!= password):
-            return error_message("Password salah")
+            return { 'status': 'ERROR', 'message': 'Password Salah' }
         tokenid = str(uuid.uuid4()) 
         self.sessions[tokenid]={ 'username': username, 'userdetail':self.users[username]}
-        return ok_token(tokenid)
+        return { 'status': 'OK', 'tokenid': tokenid }
 
     def get_user(self,username):
         if (username not in self.users):
@@ -178,12 +230,12 @@ class Chat:
 
     def send_message(self,sessionid,username_from,username_dest,message):
         if (sessionid not in self.sessions):
-            return error_message("Session Tidak Ditemukan")
+            return {'status': 'ERROR', 'message': 'Session Tidak Ditemukan'}
         s_fr = self.get_user(username_from)
         s_to = self.get_user(username_dest)
 
         if (s_fr==False or s_to==False):
-            return error_message("User Tidak Ditemukan")
+            return {'status': 'ERROR', 'message': 'User Tidak Ditemukan'}
 
         message = { 'msg_from': s_fr['nama'], 'msg_to': s_to['nama'], 'msg': message }
         outqueue_sender = s_fr['outgoing']
@@ -198,33 +250,8 @@ class Chat:
         except KeyError:
             inqueue_receiver[username_from]=Queue()
             inqueue_receiver[username_from].put(message)
-        return ok_message("Message Sent")
-    
-    def send_group_message(self, sessionid, username_from, usernames_dest, message):
-        if (sessionid not in self.sessions):
-            return error_message("Session Tidak Ditemukan")
-        s_fr = self.get_user(username_from)
-        if s_fr is False:
-            return error_message("User Tidak Ditemukan")
-        for username_dest in usernames_dest:
-            s_to = self.get_user(username_dest)
-            if s_to is False:
-                continue
-            message = {'msg_from': s_fr['nama'], 'msg_to': s_to['nama'], 'msg': message}
-            outqueue_sender = s_fr['outgoing']
-            inqueue_receiver = s_to['incoming']
-            try:    
-                outqueue_sender[username_from].put(message)
-            except KeyError:
-                outqueue_sender[username_from]=Queue()
-                outqueue_sender[username_from].put(message)
-            try:
-                inqueue_receiver[username_from].put(message)
-            except KeyError:
-                inqueue_receiver[username_from]=Queue()
-                inqueue_receiver[username_from].put(message)
-        return ok_message("Message Sent")
-    
+        return {'status': 'OK', 'message': 'Message Sent'}
+
     def get_inbox(self,username):
         s_fr = self.get_user(username)
         incoming = s_fr['incoming']
@@ -233,103 +260,218 @@ class Chat:
             msgs[users]=[]
             while not incoming[users].empty():
                 msgs[users].append(s_fr['incoming'][users].get_nowait())
-        return ok_message(msgs)
 
-    def add_realm(self, realm_id, realm_dest_address, realm_dest_port, data):
-        j = data.split()
-        j[0] = "recvrealm"
-        data = ' '.join(j)
-        data += "\r\n"
-        if realm_id in self.realms:
-            return error_message("Realm Sudah Ada")
-          
-        self.realms[realm_id] = RealmThreadCommunication(self, realm_dest_address, realm_dest_port)
-        result = self.realms[realm_id].sendstring(data)
-        return result
+        return {'status': 'OK', 'messages': msgs}
 
-    def recv_realm(self, realm_id, realm_dest_address, realm_dest_port, data):
-        self.realms[realm_id] = RealmThreadCommunication(self, realm_dest_address, realm_dest_port)
-        return {'status':'OK'}
+    def get_group(self,groupname):
+        if (groupname not in self.groups):
+            return False
+        return self.groups[groupname]
 
-    def send_realm_message(self, sessionid, realm_id, username_from, username_dest, message, data):
+    def create_group(self,sessionid,username,groupname,password):
         if (sessionid not in self.sessions):
-            error_message("Session Tidak Ditemukan")
-        if (realm_id not in self.realms):
-            return error_message("Realm Tidak Ditemukan")
-        s_fr = self.get_user(username_from)
-        s_to = self.get_user(username_dest)
-        if (s_fr==False or s_to==False):
-            return error_message("User Tidak Ditemukan")
-        message = { 'msg_from': s_fr['nama'], 'msg_to': s_to['nama'], 'msg': message }
-        self.realms[realm_id].put(message)
-        
-        j = data.split()
-        j[0] = "recvrealmprivatemsg"
-        j[1] = username_from
-        data = ' '.join(j)
-        data += "\r\n"
-        self.realms[realm_id].sendstring(data)
-        return ok_message("Message Sent to Realm")
+            return {'status': 'ERROR', 'message': 'Session Tidak Ditemukan'}
+        if (groupname in self.groups):
+            return { 'status': 'ERROR', 'message': 'Group sudah ada' }
+        self.groups[groupname]={
+            'nama': groupname,
+            'password': password,
+            'incoming' : {},
+            'members' : [],
+            'incomingrealm' : {}
+        }
+        self.groups[groupname]['members'].append(username)
+        return { 'status': 'OK', 'message': 'Create group berhasil' }
 
-    def recv_realm_message(self, realm_id, username_from, username_dest, message, data):
-        if (realm_id not in self.realms):
-            return error_message("Realm Tidak Ditemukan")
+    def join_group(self,sessionid,username,groupname,password):
+        if (sessionid not in self.sessions):
+            return {'status': 'ERROR', 'message': 'Session Tidak Ditemukan'}
+        if (groupname not in self.groups):
+            return { 'status': 'ERROR', 'message': 'Group belum ada' }
+        if (self.groups[groupname]['password']!= password):
+            return { 'status': 'ERROR', 'message': 'Password Salah' }
+        if (username in self.groups[groupname]['members']):
+            return { 'status': 'ERROR', 'message': 'User sudah join' }
+        self.groups[groupname]['members'].append(username)
+        return { 'status': 'OK', 'message': 'Join group berhasil' }
+
+    def send_group(self,sessionid,username_from,group_dest,message):
+        if (sessionid not in self.sessions):
+            return {'status': 'ERROR', 'message': 'Session Tidak Ditemukan'}
+        if (group_dest not in self.groups):
+            return { 'status': 'ERROR', 'message': 'Group belum ada' }
+        if (username_from not in self.groups[group_dest]['members']):
+            return { 'status': 'ERROR', 'message': 'Bukan member group' }
         s_fr = self.get_user(username_from)
-        s_to = self.get_user(username_dest)
+        g_to = self.get_group(group_dest)
+
+        if (s_fr==False):
+            return {'status': 'ERROR', 'message': 'User Tidak Ditemukan'}
+        if (g_to==False):
+            return {'status': 'ERROR', 'message': 'Group Tidak Ditemukan'}
+
+        message = { 'msg_from': s_fr['nama'], 'msg_to': g_to['nama'], 'msg': message }
+        outqueue_sender = s_fr['outgoing']
+        inqueue_receiver = g_to['incoming']
+        try:
+            outqueue_sender[username_from].put(message)
+        except KeyError:
+            outqueue_sender[username_from]=Queue()
+            outqueue_sender[username_from].put(message)
+        try:
+            inqueue_receiver[username_from].put(message)
+        except KeyError:
+            inqueue_receiver[username_from]=Queue()
+            inqueue_receiver[username_from].put(message)
+        return {'status': 'OK', 'message': 'Message Sent'}
+
+    def get_inbox_group(self,sessionid, username, groupname):
+        if (sessionid not in self.sessions):
+            return {'status': 'ERROR', 'message': 'Session Tidak Ditemukan'}
+        if (groupname not in self.groups):
+            return { 'status': 'ERROR', 'message': 'Group belum ada' }
+        if (username not in self.groups[groupname]['members']):
+            return { 'status': 'ERROR', 'message': 'Bukan member group' }
+        s_fr = self.get_group(groupname)
+        incoming = s_fr['incoming']
+        msgs={}
+        for users in incoming:
+            msgs[users]=[]
+            temp_queue = incoming[users].queue.copy()
+            while len(temp_queue) > 0:
+                msgs[users].append(temp_queue.pop())
+
+        return {'status': 'OK', 'messages': msgs}
+
+    def create_realm(self,realm_id,realm_address,realm_port,src_address,src_port):
+        if (realm_id in self.realms_info):
+            return { 'status': 'ERROR', 'message': 'Realm sudah ada' }
+        try:
+            self.realms[realm_id] = RealmThreadCommunication(self, realm_address, realm_port)
+            result = self.realms[realm_id].sendstring("ackrealm {} {} {} {} {}\r\n" . format(realm_id, realm_address, realm_port, src_address, src_port))
+            if result['status']=='OK':
+                self.realms_info[realm_id] = {'serverip': realm_address, 'port': realm_port}
+                return result
+            else:
+                return {'status': 'ERROR', 'message': 'Realm unreachable'}
+        except:
+            return {'status': 'ERROR', 'message': 'Realm unreachable'}
+   
+    def ack_realm(self,realm_id,realm_address,realm_port,src_address,src_port):
+        self.realms[realm_id] = RealmThreadCommunication(self, src_address, src_port)
+        self.realms_info[realm_id] = {'serverip': src_address, 'port': src_port}
+        return { 'status': 'OK', 'message': 'Connect realm berhasil' }
+
+    def check_realm(self):
+        return { 'status': 'OK', 'message': self.realms_info }
+
+    def send_realm(self,sessionid,src_realm_addr,src_realm_port,realm_id,username_from,username_to,message):
+        if (sessionid not in self.sessions):
+            return {'status': 'ERROR', 'message': 'Session Tidak Ditemukan'}
+        if (realm_id not in self.realms_info):
+            return { 'status': 'ERROR', 'message': 'Realm belum ada' }
+        
+        s_fr = self.get_user(username_from)
+        s_to = self.get_user(username_to)
         if (s_fr==False or s_to==False):
-            return error_message("User Tidak Ditemukan")
-        message = { 'msg_from': s_fr['nama'], 'msg_to': s_to['nama'], 'msg': message }
-        self.realms[realm_id].put(message)
-        return ok_message("Message Sent to Realm")
+            return {'status': 'ERROR', 'message': 'User Tidak Ditemukan'}
+        message_to_put = { 'msg_from': s_fr['nama'] + "(" + src_realm_addr + ":" + str(src_realm_port) + ")", 'msg_to': s_to['nama'], 'msg': message }
+        self.realms[realm_id].put_private(message_to_put)
+        return {'status': 'OK', 'message': 'Pesan realm dikirim'}
+
+    def get_inbox_realm(self,sessionid,username,realm_id):
+        if (sessionid not in self.sessions):
+            return {'status': 'ERROR', 'message': 'Session Tidak Ditemukan'}
+        if (realm_id not in self.realms_info):
+            return { 'status': 'ERROR', 'message': 'Realm belum ada' }
+        return self.realms[realm_id].sendstring("remoteinboxrealm {} {}\r\n".format(username, realm_id))
     
-    def send_group_realm_message(self, sessionid, realm_id, username_from, usernames_to, message, data):
-        if (sessionid not in self.sessions):
-            error_message("Session Tidak Ditemukan")
-        if realm_id not in self.realms:
-            return error_message("Realm Tidak Ditemukan")
-        s_fr = self.get_user(username_from)
-        for username_to in usernames_to:
-            s_to = self.get_user(username_to)
-            message = {'msg_from': s_fr['nama'], 'msg_to': s_to['nama'], 'msg': message }
-            self.realms[realm_id].put(message)
+    def get_remote_inbox_realm(self,username,realm_id):
+        if (realm_id not in self.realms_info):
+            return { 'status': 'ERROR', 'message': 'Realm belum ada' }
+        s_fr = self.get_user(username)
+        msgs=[]
+        temp_queue = self.realms[realm_id].chat['users'][s_fr['nama']].queue.copy()
+        while len(temp_queue) > 0:
+            msgs.append(temp_queue.pop())
+        return {'status': 'OK', 'messages': msgs}
+
+    def send_group_realm(self, sessionid, src_realm_addr, src_realm_port, realm_id, username_from, groupname, message):
+        if sessionid not in self.sessions:
+            return {'status': 'ERROR', 'message': 'Session Tidak Ditemukan'}
+        if realm_id not in self.realms_info:
+            return {'status': 'ERROR', 'message': 'Realm belum ada'}
         
-        j = data.split()
-        j[0] = "recvrealmgroupmsg"
-        j[1] = username_from
-        data = ' '.join(j)
-        data +="\r\n"
-        self.realms[realm_id].sendstring(data)
-        return ok_message("Message Sent to Group in Realm")
+        group = self.groups[groupname]
+        if username_from not in group['members']:
+            return {'status': 'ERROR', 'message': 'Bukan member group'}
 
-    def recv_group_realm_message(self, realm_id, username_from, usernames_to, message, data):
-        if realm_id not in self.realms:
-            return error_message("Realm Tidak Ditemukan")
         s_fr = self.get_user(username_from)
-        for username_to in usernames_to:
-            s_to = self.get_user(username_to)
-            message = {'msg_from': s_fr['nama'], 'msg_to': s_to['nama'], 'msg': message }
-            self.realms[realm_id].put(message)
-        return ok_message("Message Sent to Group in Realm")
+        g_to = self.get_group(groupname)
+        if (s_fr==False):
+            return {'status': 'ERROR', 'message': 'User Tidak Ditemukan'}
+        if (g_to==False):
+            return {'status': 'ERROR', 'message': 'Grup Tidak Ditemukan'}
+        
+        message_to_put = {'msg_from': s_fr['nama'] + "(" + src_realm_addr + ":" + str(src_realm_port) + ")", 'msg_to': g_to['nama'], 'msg': message}
+        self.realms[realm_id].put_group(message_to_put)
 
-    def get_realm_inbox(self, username,realmid):
-        if (realmid not in self.realms):
-            return error_message("Realm Tidak Ditemukan")
-        s_fr = self.get_user(username)
-        result = self.realms[realmid].sendstring("getrealmchat {} {}\r\n".format(realmid, username))
-        return result
-    def get_realm_chat(self, realmid, username):
-        s_fr = self.get_user(username)
-        msgs = []
-        while not self.realms[realmid].chat[s_fr['nama']].empty():
-            msgs.append(self.realms[realmid].chat[s_fr['nama']].get_nowait())
-        return ok_message(msgs)
+        return self.realms[realm_id].sendstring("recvgrouprealm {} {} {} {}\r\n" . format(realm_id, username_from, groupname, message))
+    
+    def recv_group_realm(self, realm_id, username_from, groupname, message):
+        if (realm_id not in self.realms):
+            return {'status': 'ERROR', 'message': 'Realm belum ada'}
+        s_fr = self.get_user(username_from)
+        g_to = self.get_group(groupname)
+        if (s_fr==False):
+            return {'status': 'ERROR', 'message': 'User Tidak Ditemukan'}
+        if (g_to==False):
+            return {'status': 'ERROR', 'message': 'Grup Tidak Ditemukan'}
 
+        src_realm_addr = self.realms_info[realm_id]['serverip']
+        src_realm_port = self.realms_info[realm_id]['port']
+        
+        try:
+            message_to_put = {'msg_from': s_fr['nama'] + "(" + src_realm_addr + ":" + str(src_realm_port) + ")", 'msg_to': g_to['nama'], 'msg': message}
+            self.realms[realm_id].put_group(message_to_put)
+            return {'status': 'OK', 'message': 'Pesan grup realm terkirim'}
+        except:
+            return {'status': 'ERROR', 'message': 'Pesan grup realm gagal terkirim'}
+    
+    def get_inbox_group_realm(self,sessionid,username,groupname,realm_id):
+        if (sessionid not in self.sessions):
+            return {'status': 'ERROR', 'message': 'Session Tidak Ditemukan'}
+        if (groupname not in self.groups):
+            return { 'status': 'ERROR', 'message': 'Group belum ada' }
+        if (username not in self.groups[groupname]['members']):
+            return { 'status': 'ERROR', 'message': 'Bukan member group' }
+        if (realm_id not in self.realms_info):
+            return { 'status': 'ERROR', 'message': 'Realm belum ada' }
+        return self.realms[realm_id].sendstring("remoteinboxgrouprealm {} {}\r\n".format(groupname, realm_id))
+    
+    def get_remote_inbox_group_realm(self,groupname,realm_id):
+        if (realm_id not in self.realms_info):
+            return { 'status': 'ERROR', 'message': 'Realm belum ada' }
+        s_fr = self.get_group(groupname)
+        incoming = s_fr['incoming']    
+        msgs=[]
+        temp_queue = self.realms[realm_id].chat['groups'][s_fr['nama']].queue.copy()
+        while len(temp_queue) > 0:
+            msgs.append(temp_queue.pop())
+        return {'status': 'OK', 'messages': msgs}
+    
+    def sessioncheck(self):
+        return {"status": "OK", "message": self.sessions}
+    
 if __name__=="__main__":
     j = Chat()
-    sesi = j.proses("auth messi surabaya")
+
+    sesi = j.proses("login messi surabaya")
     print(sesi)
-    sesi2 = j.proses("auth henderson surabaya")
     tokenid = sesi['tokenid']
-    print(j.proses("send {} henderson hello gimana kabarnya son " . format(tokenid)))
+    print(j.proses("send {} henderson hello gimana kabarnya son".format(tokenid)))
+    print(j.proses("send {} messi hello gimana kabarnya mess".format(tokenid)))
+    print("isi mailbox dari messi")
+    print(j.get_inbox('messi'))
     print("isi mailbox dari henderson")
     print(j.get_inbox('henderson'))
